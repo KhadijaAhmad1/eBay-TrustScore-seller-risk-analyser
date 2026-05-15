@@ -1,0 +1,207 @@
+/* eBay TrustScore — Overlay Styles */
+
+#ebay-trustscore-overlay {
+  margin: 12px 0;
+  opacity: 0;
+  transform: translateY(-6px);
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+#ebay-trustscore-overlay.ts-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.ts-card {
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  background: #ffffff;
+  border: 2px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+  max-width: 100%;
+}
+
+.ts-card.ts-risk--low    { border-color: #10b981; }
+.ts-card.ts-risk--medium { border-color: #f59e0b; }
+.ts-card.ts-risk--high   { border-color: #ef4444; }
+.ts-card.ts-risk--critical { border-color: #dc2626; background: #fff5f5; }
+
+.ts-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.ts-brand {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ts-logo { font-size: 18px; }
+
+.ts-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #111827;
+  letter-spacing: 0.3px;
+}
+
+.ts-score-badge {
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+  padding: 4px 10px;
+  border-radius: 20px;
+  color: white;
+}
+
+.ts-score-num {
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.ts-score-100 {
+  font-size: 11px;
+  opacity: 0.85;
+}
+
+.ts-risk-bar {
+  height: 6px;
+  background: #f3f4f6;
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.ts-risk-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.6s ease;
+}
+
+.ts-risk-label {
+  font-size: 13px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.ts-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 10px;
+  color: white;
+}
+
+.ts-badge--danger { background: #ef4444; }
+.ts-badge--warn   { background: #f59e0b; }
+
+.ts-summary {
+  font-size: 12px;
+  color: #4b5563;
+  margin: 0 0 12px;
+  line-height: 1.5;
+}
+
+/* Score breakdown bars */
+.ts-breakdown {
+  margin-bottom: 10px;
+}
+
+.ts-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+
+.ts-bar-label {
+  font-size: 11px;
+  color: #6b7280;
+  width: 110px;
+  flex-shrink: 0;
+}
+
+.ts-bar-track {
+  flex: 1;
+  height: 5px;
+  background: #f3f4f6;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.ts-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.5s ease;
+}
+
+.ts-bar-pts {
+  font-size: 10px;
+  color: #9ca3af;
+  width: 30px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+/* Toggle button */
+.ts-toggle {
+  background: none;
+  border: none;
+  font-size: 11px;
+  color: #6b7280;
+  cursor: pointer;
+  padding: 4px 0;
+  display: block;
+  width: 100%;
+  text-align: left;
+}
+
+.ts-toggle:hover { color: #374151; }
+
+/* Flags section */
+.ts-flags {
+  display: none;
+  margin-top: 8px;
+}
+
+.ts-flags.ts-open { display: block; }
+
+.ts-flag {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 7px 10px;
+  border-radius: 7px;
+  margin-bottom: 5px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.ts-flag--danger  { background: #fef2f2; color: #b91c1c; }
+.ts-flag--warning { background: #fffbeb; color: #92400e; }
+.ts-flag--info    { background: #eff6ff; color: #1e40af; }
+
+.ts-flag-icon { font-size: 13px; flex-shrink: 0; margin-top: 1px; }
+
+/* Footer */
+.ts-footer {
+  font-size: 10px;
+  color: #9ca3af;
+  margin-top: 10px;
+  text-align: center;
+}
+
+.ts-footer a {
+  color: #6b7280;
+  text-decoration: none;
+}
+
+.ts-footer a:hover { text-decoration: underline; }

@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>eBay TrustScore</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="popup">
+
+    <header class="popup-header">
+      <div class="brand">
+        <div class="shield-icon">🛡</div>
+        <div>
+          <div class="brand-name">TrustScore</div>
+          <div class="brand-sub">eBay Risk Analyser</div>
+        </div>
+      </div>
+      <div class="header-tabs">
+        <button class="htab active" data-tab="report">Report</button>
+        <button class="htab" data-tab="settings">AI ⚙</button>
+      </div>
+    </header>
+
+    <!-- REPORT TAB -->
+    <div class="tab-content active" id="tabReport">
+
+      <div class="state" id="stateNoListing">
+        <div class="empty-icon">🔍</div>
+        <p class="empty-title">Open an eBay listing</p>
+        <p class="empty-sub">Navigate to any eBay product page and TrustScore will automatically analyse the seller risk.</p>
+        <a href="https://www.ebay.co.uk" target="_blank" class="cta-btn">Browse eBay</a>
+      </div>
+
+      <div class="state hidden" id="stateLoading">
+        <div class="loader"><div class="loader-ring"></div></div>
+        <p class="loading-text">Analysing seller...</p>
+      </div>
+
+      <div class="state hidden" id="stateReport">
+        <div class="score-section">
+          <div class="score-ring-wrapper">
+            <svg class="score-ring" viewBox="0 0 120 120">
+              <circle class="ring-bg" cx="60" cy="60" r="50"/>
+              <circle class="ring-fill" id="ringFill" cx="60" cy="60" r="50"
+                stroke-dasharray="314" stroke-dashoffset="314" transform="rotate(-90 60 60)"/>
+            </svg>
+            <div class="score-center">
+              <div class="score-num" id="scoreNum">--</div>
+              <div class="score-label">/ 100</div>
+            </div>
+          </div>
+          <div class="score-info">
+            <div class="risk-pill" id="riskPill">Analysing...</div>
+            <div class="score-item-title" id="scoreItemTitle">—</div>
+          </div>
+        </div>
+
+        <div class="ai-summary-box">
+          <div class="ai-summary-hdr" id="aiSummaryHdr">
+            <span class="ai-dot" id="aiDot"></span>
+            <span class="ai-hdr-label" id="aiHdrLabel">SUMMARY</span>
+          </div>
+          <div class="ai-summary-body" id="summaryBox">—</div>
+        </div>
+
+        <div class="section-label">Score Breakdown</div>
+        <div class="breakdown" id="breakdown"></div>
+
+        <div class="section-label" id="flagsLabel" style="display:none">Risk Flags</div>
+        <div class="flags-list" id="flagsList"></div>
+      </div>
+    </div>
+
+    <!-- SETTINGS TAB -->
+    <div class="tab-content hidden" id="tabSettings">
+      <div class="settings-body">
+
+        <div class="set-title">AI Provider</div>
+        <p class="set-desc">Add your API key to get richer AI-generated risk summaries.</p>
+
+        <div class="toggle-row">
+          <span class="toggle-lbl">Enable AI summaries</span>
+          <label class="sw">
+            <input type="checkbox" id="aiEnabledToggle">
+            <span class="sw-track"></span>
+          </label>
+        </div>
+
+        <div class="set-field">
+          <label class="set-lbl">Provider</label>
+          <div class="provider-btns">
+            <button class="p-btn active" data-p="claude">Claude</button>
+            <button class="p-btn" data-p="openai">OpenAI</button>
+            <button class="p-btn" data-p="gemini">Gemini</button>
+            <button class="p-btn" data-p="custom">Custom</button>
+          </div>
+        </div>
+
+        <div class="pcfg active" id="pcfgClaude">
+          <div class="set-field">
+            <label class="set-lbl">Anthropic API Key</label>
+            <div class="key-row">
+              <input type="password" class="set-input" id="cfgClaudeKey" placeholder="sk-ant-api03-...">
+              <button class="eye-btn" data-t="cfgClaudeKey">👁</button>
+            </div>
+          </div>
+          <div class="set-field">
+            <label class="set-lbl">Model</label>
+            <select class="set-select" id="cfgClaudeModel">
+              <option value="claude-sonnet-4-20250514">claude-sonnet-4</option>
+              <option value="claude-haiku-4-5-20251001">claude-haiku-4-5 (fast)</option>
+              <option value="claude-opus-4-20250514">claude-opus-4</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="pcfg hidden" id="pcfgOpenai">
+          <div class="set-field">
+            <label class="set-lbl">OpenAI API Key</label>
+            <div class="key-row">
+              <input type="password" class="set-input" id="cfgOpenaiKey" placeholder="sk-proj-...">
+              <button class="eye-btn" data-t="cfgOpenaiKey">👁</button>
+            </div>
+          </div>
+          <div class="set-field">
+            <label class="set-lbl">Model</label>
+            <select class="set-select" id="cfgOpenaiModel">
+              <option value="gpt-4o">gpt-4o</option>
+              <option value="gpt-4o-mini">gpt-4o-mini (fast)</option>
+              <option value="gpt-4-turbo">gpt-4-turbo</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="pcfg hidden" id="pcfgGemini">
+          <div class="set-field">
+            <label class="set-lbl">Google API Key</label>
+            <div class="key-row">
+              <input type="password" class="set-input" id="cfgGeminiKey" placeholder="AIzaSy...">
+              <button class="eye-btn" data-t="cfgGeminiKey">👁</button>
+            </div>
+          </div>
+          <div class="set-field">
+            <label class="set-lbl">Model</label>
+            <select class="set-select" id="cfgGeminiModel">
+              <option value="gemini-2.0-flash">gemini-2.0-flash</option>
+              <option value="gemini-1.5-flash">gemini-1.5-flash</option>
+              <option value="gemini-1.5-pro">gemini-1.5-pro</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="pcfg hidden" id="pcfgCustom">
+          <div class="set-field">
+            <label class="set-lbl">Base URL</label>
+            <input type="text" class="set-input" id="cfgCustomUrl" placeholder="http://localhost:11434/v1">
+          </div>
+          <div class="set-field">
+            <label class="set-lbl">API Key (optional)</label>
+            <div class="key-row">
+              <input type="password" class="set-input" id="cfgCustomKey" placeholder="Bearer token or leave blank">
+              <button class="eye-btn" data-t="cfgCustomKey">👁</button>
+            </div>
+          </div>
+          <div class="set-field">
+            <label class="set-lbl">Model name</label>
+            <input type="text" class="set-input" id="cfgCustomModel" placeholder="llama3, mistral, mixtral...">
+          </div>
+        </div>
+
+        <button class="save-btn" id="saveSettingsBtn">Save Settings</button>
+        <div class="save-ok hidden" id="saveOk">✓ Settings saved</div>
+
+        <div class="set-note">
+          Keys stored in chrome.storage.local — only sent to the provider API you configure. Never to any third party.
+        </div>
+
+      </div>
+    </div>
+
+    <footer class="popup-footer">
+      <span>eBay TrustScore v1.1</span>
+      <a href="https://github.com/meeral/ebay-trustscore" target="_blank">GitHub ↗</a>
+    </footer>
+
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

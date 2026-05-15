@@ -1,13 +1,12 @@
 /**
- * eBay TrustScore — Content Script v2
- * Multi-strategy scraper: tries many selectors + full-page text search as fallback
- * Works across eBay UK and eBay US listing pages
+ * eBay TrustScore — Content Script v2.1
+ * Multi-strategy scraper with "innocent until proven guilty" principle:
+ * only penalises on CONFIRMED signals, neutral defaults otherwise.
  */
 
 (function () {
   'use strict';
 
-  // ── UTILITY: search all text nodes on page for a regex ───────────────────
   function searchPageText(regex) {
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
     let node;
@@ -18,51 +17,26 @@
     return null;
   }
 
-  // ── UTILITY: try a list of selectors, return first match ─────────────────
   function trySelectors(selectors) {
     for (const sel of selectors) {
       try {
         const el = document.querySelector(sel);
         if (el && el.textContent.trim()) return el;
-      } catch (e) { /* invalid selector, skip */ }
+      } catch (e) {}
     }
     return null;
   }
 
-  // ── UTILITY: find element whose text matches a regex ─────────────────────
-  function findByText(tag, regex) {
-    const els = document.querySelectorAll(tag);
-    for (const el of els) {
-      if (regex.test(el.textContent)) return el;
-    }
-    return null;
-  }
-
-  // ── SCRAPER ───────────────────────────────────────────────────────────────
   function scrapeListingData() {
     const data = { listingIssues: [], _debug: {} };
 
     // ── 1. FEEDBACK COUNT ─────────────────────────────────────────────────
-    // Strategy A: data-testid attributes (eBay's current structure)
     let feedbackCount = null;
 
-    const feedbackSelectors = [
-      '[data-testid="str-title"] + [data-testid="str-rating"]',
-      '.str-seller-card__feedback-cnt',
-      '.mbg-l .mbg-cnt',
-      '.ux-seller-section .ux-textspans--BOLD',
-      '[class*="feedback"] [class*="count"]',
-      '[class*="feedback-count"]',
-      '.str-seller-card a span',
-    ];
-
-    // Try all eBay seller info sections
     const sellerSection = document.querySelector(
       '[data-testid="str-title-section"], .str-seller-card, .x-sellercard-atf, [class*="seller-card"]'
     );
-
     if (sellerSection) {
-      // Look for a bold number inside the seller section
       const boldEls = sellerSection.querySelectorAll('span, strong, b');
       for (const el of boldEls) {
         const txt = el.textContent.trim().replace(/,/g, '');
@@ -75,29 +49,19 @@
       }
     }
 
-    // Strategy B: look for "X feedback" pattern anywhere on page
     if (feedbackCount === null) {
       const match = searchPageText(/(\d[\d,]*)\s+feedback/i);
-      if (match) {
-        feedbackCount = parseInt(match[1].replace(/,/g, ''));
-        data._debug.feedbackSource = 'pageText "X feedback"';
-      }
+      if (match) { feedbackCount = parseInt(match[1].replace(/,/g, '')); data._debug.feedbackSource = 'pageText "X feedback"'; }
     }
 
-    // Strategy C: look for "seller's other items" link with feedback count
     if (feedbackCount === null) {
       const links = document.querySelectorAll('a[href*="feedback"], a[href*="fdbk"]');
       for (const link of links) {
         const match = link.textContent.match(/(\d[\d,]+)/);
-        if (match) {
-          feedbackCount = parseInt(match[1].replace(/,/g, ''));
-          data._debug.feedbackSource = 'feedback link';
-          break;
-        }
+        if (match) { feedbackCount = parseInt(match[1].replace(/,/g, '')); data._debug.feedbackSource = 'feedback link'; break; }
       }
     }
 
-    // Strategy D: structured data in script tags
     if (feedbackCount === null) {
       const scripts = document.querySelectorAll('script[type="application/ld+json"]');
       for (const s of scripts) {
@@ -115,220 +79,119 @@
     // ── 2. FEEDBACK PERCENTAGE ────────────────────────────────────────────
     let feedbackPercent = null;
 
-    // Strategy A: look for "X% positive feedback" pattern
     const pctMatch = searchPageText(/([\d.]+)%\s*positive/i);
-    if (pctMatch) {
-      feedbackPercent = parseFloat(pctMatch[1]);
-      data._debug.pctSource = 'pageText "X% positive"';
-    }
+    if (pctMatch) { feedbackPercent = parseFloat(pctMatch[1]); data._debug.pctSource = '"X% positive"'; }
 
-    // Strategy B: any percentage near "feedback" text
-    if (feedbackPercent === null) {
-      const allText = document.body.innerText;
-      const matches = [...allText.matchAll(/([\d.]+)%/g)];
-      for (const m of matches) {
-        const val = parseFloat(m[1]);
-        if (val >= 90 && val <= 100) {
-          feedbackPercent = val;
-          data._debug.pctSource = 'body text percentage 90-100';
-          break;
-        }
-      }
-    }
-
-    // Strategy C: JSON-LD ratingValue
     if (feedbackPercent === null) {
       const scripts = document.querySelectorAll('script[type="application/ld+json"]');
       for (const s of scripts) {
         try {
           const json = JSON.parse(s.textContent);
           const rv = json?.seller?.ratingValue || json?.aggregateRating?.ratingValue;
-          if (rv) {
-            const v = parseFloat(rv);
-            feedbackPercent = v <= 5 ? (v / 5) * 100 : v;
-            data._debug.pctSource = 'JSON-LD ratingValue';
-            break;
-          }
+          if (rv) { const v = parseFloat(rv); feedbackPercent = v <= 5 ? (v/5)*100 : v; data._debug.pctSource = 'JSON-LD'; break; }
         } catch (e) {}
       }
     }
 
-    data.feedbackPercent = feedbackPercent ?? 99.0;
+    // Note: we intentionally do NOT search for any random 90-100% number on the
+    // page — that produced false positives. Only confirmed "X% positive" text is used.
+    data.feedbackPercent = feedbackPercent ?? null;
+    data._feedbackPercentConfirmed = feedbackPercent !== null;
     data._debug.feedbackPercent = data.feedbackPercent;
 
     // ── 3. ITEM TITLE ─────────────────────────────────────────────────────
     const titleEl = trySelectors([
-      'h1.x-item-title__mainTitle span',
-      'h1[class*="title"] span',
-      '.x-item-title__mainTitle',
-      'h1.it-ttl',
-      '#itemTitle',
-      'h1',
+      'h1.x-item-title__mainTitle span', 'h1[class*="title"] span',
+      '.x-item-title__mainTitle', 'h1.it-ttl', '#itemTitle', 'h1',
     ]);
     data.title = titleEl ? titleEl.textContent.trim().slice(0, 120) : 'eBay Listing';
 
-    // ── 4. ITEM PRICE ─────────────────────────────────────────────────────
+    // ── 4. PRICE ─────────────────────────────────────────────────────────
     const priceEl = trySelectors([
-      '.x-price-primary [class*="price"] .ux-textspans',
       '.x-price-primary .ux-textspans--BOLD',
       '[data-testid="x-price-primary"] span',
       '.notranslate[itemprop="price"]',
-      '#prcIsum',
-      '[itemprop="price"]',
-      '.display-price',
+      '#prcIsum', '[itemprop="price"]', '.display-price',
     ]);
-
     if (priceEl) {
       const raw = priceEl.getAttribute('content') || priceEl.textContent;
       const match = raw.replace(/,/g, '').match(/[\d]+\.?\d*/);
       data.currentPrice = match ? parseFloat(match[0]) : null;
     }
-
-    // Fallback: look for £ or $ price in page text
     if (!data.currentPrice) {
-      const priceMatch = searchPageText(/[£$]([\d,]+\.?\d*)/);
-      if (priceMatch) data.currentPrice = parseFloat(priceMatch[1].replace(/,/g, ''));
+      const pm = searchPageText(/[£$]([\d,]+\.?\d*)/);
+      if (pm) data.currentPrice = parseFloat(pm[1].replace(/,/g, ''));
     }
-
-    // Simulate price vs market (±15% randomised per listing based on price)
-    // In production this would call eBay sold listings API
-    if (data.currentPrice) {
-      const seed = (data.currentPrice * 1000) % 100;
-      data.priceVsMarket = 0.85 + (seed / 100) * 0.6; // 0.85–1.45 range
-    } else {
-      data.priceVsMarket = 1.0;
-    }
+    // Price vs market NOT simulated — stays unconfirmed, neutral score
+    data._priceConfirmed = false;
+    data.priceVsMarket = 1.0;
 
     // ── 5. RETURNS POLICY ─────────────────────────────────────────────────
-    const returnsTexts = ['no returns', 'seller does not accept returns', 'no return'];
     const bodyText = document.body.innerText.toLowerCase();
-    const hasNoReturns = returnsTexts.some(t => bodyText.includes(t));
-
-    // Also check specific elements
-    const returnsEl = trySelectors([
-      '[data-testid="ux-labels-values--returns"]',
-      '[class*="returns"] [class*="value"]',
-      '.ux-labels-values__values--returns',
-    ]);
-
-    if (hasNoReturns || (returnsEl && returnsEl.textContent.toLowerCase().includes('no return'))) {
+    const noReturnPhrases = ['no returns', 'seller does not accept returns'];
+    if (noReturnPhrases.some(t => bodyText.includes(t))) {
       data.listingIssues.push('no_returns');
     }
 
     // ── 6. ITEM LOCATION / OVERSEAS ───────────────────────────────────────
-    const ukTerms = ['united kingdom', 'uk', 'england', 'scotland', 'wales', 'northern ireland',
-      'london', 'manchester', 'birmingham', 'leeds', 'glasgow', 'bristol'];
-
-    // Look for location label
+    const ukTerms = ['united kingdom', ' uk ', 'england', 'scotland', 'wales',
+      'northern ireland', 'london', 'manchester', 'birmingham', 'leeds', 'bristol'];
     const locationEl = trySelectors([
       '[data-testid="ux-labels-values--item-location"]',
       '[class*="item-location"]',
-      '.ux-labels-values__values--item-location',
     ]);
-
     let locationText = '';
     if (locationEl) {
       locationText = locationEl.textContent.toLowerCase();
     } else {
-      // Search page for location patterns
-      const locMatch = searchPageText(/item location\s*:?\s*([^\n]+)/i);
+      const locMatch = searchPageText(/item\s+location\s*:?\s*([^\n]{3,50})/i);
       if (locMatch) locationText = locMatch[1].toLowerCase();
     }
-
     if (locationText && !ukTerms.some(t => locationText.includes(t))) {
       data.listingIssues.push('overseas_seller');
-      data.itemLocation = locationText.trim();
+      data.itemLocation = locationText.trim().slice(0, 40);
     }
 
     // ── 7. IMAGE COUNT ────────────────────────────────────────────────────
-    const imageSelectors = [
-      '.ux-image-carousel-item img',
-      '[class*="image-carousel"] img',
-      '[class*="pic-col"] img',
-      '.img-gallery img',
-      '[data-testid*="image"] img',
-    ];
-
-    let imageCount = 0;
-    for (const sel of imageSelectors) {
-      const imgs = document.querySelectorAll(sel);
-      if (imgs.length > 0) { imageCount = imgs.length; break; }
-    }
-
-    // Also count thumbnail images
-    if (imageCount === 0) {
-      const thumbs = document.querySelectorAll('[class*="thumb"] img, [class*="thumbnail"] img');
-      imageCount = thumbs.length;
-    }
-
-    if (imageCount <= 1) {
-      data.listingIssues.push('stock_photo_only');
-    }
+    // REMOVED — eBay lazy-loads images so count at injection time is always 0-1.
+    // This was causing false "stock photo" flags on all listings.
 
     // ── 8. QUANTITY ───────────────────────────────────────────────────────
-    const qtyMatch = searchPageText(/(\d+)\s+available/i) || searchPageText(/(\d+)\s+sold/i);
+    const qtyMatch = searchPageText(/(\d+)\s+available/i);
     if (qtyMatch && parseInt(qtyMatch[1]) > 50) {
       data.listingIssues.push('high_quantity');
     }
 
-    // ── 9. DESCRIPTION LENGTH ─────────────────────────────────────────────
-    const descFrame = document.querySelector('#desc_ifr, iframe[id*="desc"]');
-    if (descFrame) {
-      try {
-        const descText = descFrame.contentDocument?.body?.innerText || '';
-        if (descText.trim().length < 80) data.listingIssues.push('vague_description');
-      } catch (e) {}
-    }
+    // ── 9. ACCOUNT AGE ────────────────────────────────────────────────────
+    // Only confirmed if "member since" text is found on page. Never guessed.
+    data._accountAgeConfirmed = false;
+    data.accountAgeDays = 730;
 
-    // ── 10. ACCOUNT AGE ───────────────────────────────────────────────────
-    // eBay shows "member since" on seller profile - we approximate from feedback volume
-    // In production: fetch seller profile page
-    // Heuristic: very low feedback + low% suggests new account
-    let accountAgeDays = 730; // default 2 years
-
-    if (data.feedbackCount < 5 && data.feedbackPercent < 95) {
-      accountAgeDays = 30;
-    } else if (data.feedbackCount < 20) {
-      accountAgeDays = 90;
-    } else if (data.feedbackCount < 100) {
-      accountAgeDays = 365;
-    } else if (data.feedbackCount >= 1000) {
-      accountAgeDays = 1825; // 5 years
-    }
-
-    // Check if "member since" text exists on page
-    const memberMatch = searchPageText(/member\s+since[:\s]+(\w+\s+\w+\s+\d{4}|\d{4})/i);
+    const memberMatch = searchPageText(/member\s+since[:\s]+(\w+[-\s]\w+[-\s]\d{4}|\d{4})/i);
     if (memberMatch) {
       try {
         const memberDate = new Date(memberMatch[1]);
-        if (!isNaN(memberDate)) {
-          accountAgeDays = Math.floor((Date.now() - memberDate.getTime()) / (1000 * 60 * 60 * 24));
-          data._debug.accountAgeSource = 'member since text';
+        if (!isNaN(memberDate.getTime())) {
+          data.accountAgeDays = Math.floor((Date.now() - memberDate.getTime()) / 86400000);
+          data._accountAgeConfirmed = true;
+          data._debug.accountAgeSource = memberMatch[1];
         }
       } catch (e) {}
     }
 
-    data.accountAgeDays = Math.max(1, accountAgeDays);
-
-    // ── 11. DELIVERY COMPLAINT RATE ───────────────────────────────────────
-    // Derive from feedback score: lower % → higher complaint estimate
-    // In production: scrape eBay's detailed seller ratings
-    let deliveryComplaintRate = 0.5;
-    if (data.feedbackPercent < 95) deliveryComplaintRate = 6.0;
-    else if (data.feedbackPercent < 97) deliveryComplaintRate = 3.5;
-    else if (data.feedbackPercent < 98) deliveryComplaintRate = 2.0;
-    else if (data.feedbackPercent < 99) deliveryComplaintRate = 1.2;
-    else if (data.feedbackPercent >= 99.5) deliveryComplaintRate = 0.3;
-
-    data.deliveryComplaintRate = deliveryComplaintRate;
+    // ── 10. DELIVERY RATE ─────────────────────────────────────────────────
+    // Not scraped — scoring engine derives from feedback% if it's confirmed low.
+    data.deliveryComplaintRate = 0;
 
     data._debug.finalData = {
       feedbackCount: data.feedbackCount,
       feedbackPercent: data.feedbackPercent,
+      feedbackPercentConfirmed: data._feedbackPercentConfirmed,
       accountAgeDays: data.accountAgeDays,
-      priceVsMarket: data.priceVsMarket,
-      deliveryComplaintRate: data.deliveryComplaintRate,
+      accountAgeConfirmed: data._accountAgeConfirmed,
+      priceConfirmed: data._priceConfirmed,
       listingIssues: data.listingIssues,
+      title: data.title,
     };
 
     console.log('[TrustScore] Scraped data:', data._debug);

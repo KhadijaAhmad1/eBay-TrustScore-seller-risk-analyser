@@ -1,131 +1,169 @@
 /**
- * eBay TrustScore — Risk Scoring Engine
- * Core ML-inspired heuristic scoring system
- * Author: Meeral | github.com/meeral
+ * eBay TrustScore — Scoring Engine v2
+ *
+ * Design principle: only penalise on CONFIRMED signals.
+ * If data cannot be scraped, that signal scores at neutral (not zero).
+ * This prevents good listings from being dragged down by missing data.
  */
 
-/**
- * Master scoring function — returns a full TrustScore report
- * @param {Object} sellerData - Raw data scraped from eBay listing
- * @returns {Object} Full risk report with score, flags, breakdown
- */
-function computeTrustScore(sellerData) {
-  const flags = [];
+function computeTrustScore(d) {
+  const flags   = [];
   const breakdown = {};
+  const dataConfidence = {}; // track which signals had real data
 
-  // ── 1. FEEDBACK VOLUME SCORE (0–20 pts) ──────────────────────────────────
-  // Low feedback volume = high risk for buyers
-  const feedbackCount = sellerData.feedbackCount || 0;
-  let feedbackVolumeScore = 0;
-  if (feedbackCount >= 1000) feedbackVolumeScore = 20;
-  else if (feedbackCount >= 500) feedbackVolumeScore = 17;
-  else if (feedbackCount >= 100) feedbackVolumeScore = 13;
-  else if (feedbackCount >= 50)  feedbackVolumeScore = 9;
-  else if (feedbackCount >= 10)  feedbackVolumeScore = 5;
-  else {
-    feedbackVolumeScore = 2;
-    flags.push({ type: 'warning', code: 'LOW_FEEDBACK', message: `Only ${feedbackCount} feedback ratings — new or low-volume seller` });
-  }
-  breakdown.feedbackVolume = { score: feedbackVolumeScore, max: 20 };
+  // ── 1. FEEDBACK VOLUME (0–20) ─────────────────────────────────────────────
+  // Only score if we actually found a feedback count
+  const hasFeedbackCount = d.feedbackCount > 0;
+  let feedbackVolumeScore;
 
-  // ── 2. POSITIVE FEEDBACK RATE SCORE (0–25 pts) ───────────────────────────
-  const feedbackPercent = sellerData.feedbackPercent || 0;
-  let feedbackRateScore = 0;
-  if (feedbackPercent >= 99.5) feedbackRateScore = 25;
-  else if (feedbackPercent >= 99.0) feedbackRateScore = 21;
-  else if (feedbackPercent >= 98.0) feedbackRateScore = 16;
-  else if (feedbackPercent >= 95.0) feedbackRateScore = 10;
-  else if (feedbackPercent >= 90.0) feedbackRateScore = 5;
-  else {
-    feedbackRateScore = 0;
-    flags.push({ type: 'danger', code: 'LOW_FEEDBACK_RATE', message: `${feedbackPercent}% positive — significantly below eBay average (98.5%)` });
+  if (!hasFeedbackCount) {
+    // No data — neutral score, no flag
+    feedbackVolumeScore = 10;
+    dataConfidence.feedbackVolume = false;
+  } else {
+    dataConfidence.feedbackVolume = true;
+    if      (d.feedbackCount >= 1000) feedbackVolumeScore = 20;
+    else if (d.feedbackCount >= 500)  feedbackVolumeScore = 17;
+    else if (d.feedbackCount >= 100)  feedbackVolumeScore = 13;
+    else if (d.feedbackCount >= 50)   feedbackVolumeScore = 9;
+    else if (d.feedbackCount >= 10)   feedbackVolumeScore = 5;
+    else {
+      feedbackVolumeScore = 2;
+      flags.push({ type: 'warning', message: `Only ${d.feedbackCount} feedback ratings — new or low-volume seller` });
+    }
   }
-  if (feedbackPercent < 98.0 && feedbackPercent >= 95.0) {
-    flags.push({ type: 'warning', code: 'MODERATE_FEEDBACK_RATE', message: `${feedbackPercent}% positive feedback — slightly below average` });
-  }
-  breakdown.feedbackRate = { score: feedbackRateScore, max: 25 };
+  breakdown.feedbackVolume = { score: feedbackVolumeScore, max: 20, label: 'Feedback Volume', confirmed: dataConfidence.feedbackVolume };
 
-  // ── 3. ACCOUNT AGE SCORE (0–15 pts) ──────────────────────────────────────
-  const accountAgeDays = sellerData.accountAgeDays || 0;
-  let accountAgeScore = 0;
-  if (accountAgeDays >= 365 * 5) accountAgeScore = 15;
-  else if (accountAgeDays >= 365 * 2) accountAgeScore = 12;
-  else if (accountAgeDays >= 365) accountAgeScore = 9;
-  else if (accountAgeDays >= 180) accountAgeScore = 6;
-  else if (accountAgeDays >= 30) accountAgeScore = 3;
-  else {
-    accountAgeScore = 0;
-    flags.push({ type: 'danger', code: 'NEW_ACCOUNT', message: `Account created ${accountAgeDays} days ago — very new seller` });
-  }
-  if (accountAgeDays < 180 && accountAgeDays >= 30) {
-    flags.push({ type: 'warning', code: 'YOUNG_ACCOUNT', message: `Account is under 6 months old` });
-  }
-  breakdown.accountAge = { score: accountAgeScore, max: 15 };
+  // ── 2. POSITIVE FEEDBACK RATE (0–25) ─────────────────────────────────────
+  // eBay average is 98.5%. We only penalise if we actually read a value.
+  const hasFeedbackPct = d.feedbackPercent && d.feedbackPercent !== 99.0; // 99.0 is our fallback default
+  let feedbackRateScore;
 
-  // ── 4. PRICE ANOMALY SCORE (0–20 pts) ────────────────────────────────────
-  // Compare listing price vs recently sold comps
-  const priceRatio = sellerData.priceVsMarket || 1.0; // 1.0 = at market
-  let priceScore = 0;
-  if (priceRatio <= 1.05) priceScore = 20;       // within 5% of market
-  else if (priceRatio <= 1.15) priceScore = 16;  // 5–15% above
-  else if (priceRatio <= 1.25) priceScore = 10;  // 15–25% above
-  else if (priceRatio <= 1.50) priceScore = 4;   // 25–50% above
-  else {
-    priceScore = 0;
-    flags.push({ type: 'danger', code: 'PRICE_ANOMALY_HIGH', message: `Price is ${Math.round((priceRatio - 1) * 100)}% above recent sold listings` });
+  if (!hasFeedbackPct && !dataConfidence.feedbackVolume) {
+    // No data at all — neutral
+    feedbackRateScore = 13;
+    dataConfidence.feedbackRate = false;
+  } else {
+    dataConfidence.feedbackRate = true;
+    const pct = d.feedbackPercent || 99.0;
+    if      (pct >= 99.5) feedbackRateScore = 25;
+    else if (pct >= 99.0) feedbackRateScore = 21;
+    else if (pct >= 98.0) feedbackRateScore = 16;
+    else if (pct >= 95.0) feedbackRateScore = 10;
+    else if (pct >= 90.0) feedbackRateScore = 5;
+    else {
+      feedbackRateScore = 0;
+      flags.push({ type: 'danger', message: `${pct.toFixed(1)}% positive — significantly below eBay average (98.5%)` });
+    }
+    if (pct < 98.0 && pct >= 95.0) {
+      flags.push({ type: 'warning', message: `${pct.toFixed(1)}% positive feedback — slightly below average` });
+    }
   }
+  breakdown.feedbackRate = { score: feedbackRateScore, max: 25, label: 'Positive Rate', confirmed: dataConfidence.feedbackRate };
 
-  // Too cheap = also suspicious (possible counterfeit)
-  if (priceRatio < 0.60) {
-    priceScore = Math.min(priceScore, 5);
-    flags.push({ type: 'danger', code: 'PRICE_ANOMALY_LOW', message: `Price is suspiciously low — ${Math.round((1 - priceRatio) * 100)}% below market value` });
-  } else if (priceRatio < 0.80) {
-    flags.push({ type: 'warning', code: 'PRICE_BELOW_MARKET', message: `Price is ${Math.round((1 - priceRatio) * 100)}% below typical sold price — verify authenticity` });
+  // ── 3. ACCOUNT AGE (0–15) ─────────────────────────────────────────────────
+  // Only flag if we have high confidence (member-since text found, or very low feedback)
+  let accountAgeScore;
+
+  if (d._accountAgeConfirmed) {
+    // Real data from "member since" text on page
+    dataConfidence.accountAge = true;
+    if      (d.accountAgeDays >= 365 * 5) accountAgeScore = 15;
+    else if (d.accountAgeDays >= 365 * 2) accountAgeScore = 12;
+    else if (d.accountAgeDays >= 365)     accountAgeScore = 9;
+    else if (d.accountAgeDays >= 180)     accountAgeScore = 6;
+    else if (d.accountAgeDays >= 30)      accountAgeScore = 3;
+    else {
+      accountAgeScore = 0;
+      flags.push({ type: 'danger', message: `Account created ${d.accountAgeDays} days ago — very new seller` });
+    }
+    if (d.accountAgeDays < 180 && d.accountAgeDays >= 30) {
+      flags.push({ type: 'warning', message: 'Seller account is under 6 months old' });
+    }
+  } else if (d.feedbackCount > 0 && d.feedbackCount < 10) {
+    // Inferred from very low feedback — flag as warning only
+    dataConfidence.accountAge = false;
+    accountAgeScore = 4;
+    flags.push({ type: 'warning', message: `Very low feedback count (${d.feedbackCount}) — seller may be new` });
+  } else {
+    // Not enough info — give benefit of the doubt, neutral score
+    dataConfidence.accountAge = false;
+    accountAgeScore = 10;
   }
-  breakdown.priceAnomaly = { score: priceScore, max: 20 };
+  breakdown.accountAge = { score: accountAgeScore, max: 15, label: 'Account Age', confirmed: dataConfidence.accountAge };
 
-  // ── 5. LISTING QUALITY SCORE (0–10 pts) ──────────────────────────────────
+  // ── 4. PRICE ANOMALY (0–20) ───────────────────────────────────────────────
+  // Only score if we have real price vs market data (from API).
+  // If price was simulated/estimated, give full neutral score.
+  let priceScore;
+
+  if (d._priceConfirmed && d.priceVsMarket) {
+    dataConfidence.price = true;
+    const ratio = d.priceVsMarket;
+    if      (ratio <= 1.05) priceScore = 20;
+    else if (ratio <= 1.15) priceScore = 16;
+    else if (ratio <= 1.25) priceScore = 10;
+    else if (ratio <= 1.50) priceScore = 4;
+    else {
+      priceScore = 0;
+      flags.push({ type: 'danger', message: `Price is ${Math.round((ratio - 1) * 100)}% above recent sold listings` });
+    }
+    if (ratio < 0.60) {
+      priceScore = Math.min(priceScore, 5);
+      flags.push({ type: 'danger', message: `Price is ${Math.round((1 - ratio) * 100)}% below market — possible counterfeit` });
+    } else if (ratio < 0.80) {
+      flags.push({ type: 'warning', message: `Price is ${Math.round((1 - ratio) * 100)}% below typical — verify authenticity` });
+    }
+  } else {
+    // No real comp data — neutral, no flag
+    dataConfidence.price = false;
+    priceScore = 14; // slightly below full to reflect uncertainty, but not penalising
+  }
+  breakdown.priceAnomaly = { score: priceScore, max: 20, label: 'Price Analysis', confirmed: dataConfidence.price };
+
+  // ── 5. LISTING QUALITY (0–10) ─────────────────────────────────────────────
+  // Only penalise on issues that are reliably detected
   let listingScore = 10;
-  const listingIssues = sellerData.listingIssues || [];
+  const issues = d.listingIssues || [];
 
-  if (listingIssues.includes('no_returns')) {
+  if (issues.includes('no_returns')) {
     listingScore -= 3;
-    flags.push({ type: 'warning', code: 'NO_RETURNS', message: 'Seller does not accept returns' });
+    flags.push({ type: 'warning', message: 'Seller does not accept returns' });
   }
-  if (listingIssues.includes('stock_photo_only')) {
+  // Stock photo check REMOVED — unreliable due to lazy loading
+  // Only flag overseas if we actually found a non-UK location string
+  if (issues.includes('overseas_seller') && d.itemLocation) {
     listingScore -= 2;
-    flags.push({ type: 'warning', code: 'STOCK_PHOTOS', message: 'Listing uses only stock/generic photos — no actual item photos' });
+    flags.push({ type: 'warning', message: `Ships from outside UK (${d.itemLocation}) — longer delivery, harder returns` });
   }
-  if (listingIssues.includes('vague_description')) {
+  if (issues.includes('vague_description')) {
     listingScore -= 2;
-    flags.push({ type: 'info', code: 'VAGUE_DESC', message: 'Listing description is unusually short or vague' });
+    flags.push({ type: 'info', message: 'Listing description is short or vague' });
   }
-  if (listingIssues.includes('overseas_seller')) {
-    listingScore -= 2;
-    flags.push({ type: 'warning', code: 'OVERSEAS_SELLER', message: 'Item ships from outside UK — longer delivery, harder returns' });
-  }
-  if (listingIssues.includes('high_quantity')) {
+  if (issues.includes('high_quantity')) {
     listingScore -= 1;
-    flags.push({ type: 'info', code: 'HIGH_QUANTITY', message: 'Large quantity available — may indicate bulk/dropship seller' });
+    flags.push({ type: 'info', message: 'Large quantity available — may be bulk/dropship seller' });
   }
   listingScore = Math.max(0, listingScore);
-  breakdown.listingQuality = { score: listingScore, max: 10 };
+  breakdown.listingQuality = { score: listingScore, max: 10, label: 'Listing Quality', confirmed: true };
 
-  // ── 6. DELIVERY COMPLAINT SCORE (0–10 pts) ────────────────────────────────
-  const deliveryComplaintRate = sellerData.deliveryComplaintRate || 0; // percentage
-  let deliveryScore = 10;
-  if (deliveryComplaintRate > 5) {
-    deliveryScore = 0;
-    flags.push({ type: 'danger', code: 'HIGH_DELIVERY_COMPLAINTS', message: `${deliveryComplaintRate}% delivery complaints — significantly above average` });
-  } else if (deliveryComplaintRate > 2) {
-    deliveryScore = 5;
-    flags.push({ type: 'warning', code: 'MODERATE_DELIVERY_COMPLAINTS', message: `${deliveryComplaintRate}% delivery complaints — above average` });
-  } else if (deliveryComplaintRate > 1) {
-    deliveryScore = 8;
+  // ── 6. DELIVERY RECORD (0–10) ─────────────────────────────────────────────
+  // Only penalise if feedback% is confirmed AND meaningfully low
+  let deliveryScore;
+
+  if (dataConfidence.feedbackRate && d.feedbackPercent < 98) {
+    // Derive from feedback % as a proxy — directionally correct
+    if      (d.feedbackPercent < 90) { deliveryScore = 0; flags.push({ type: 'danger',  message: `Estimated high delivery complaint rate based on ${d.feedbackPercent.toFixed(1)}% feedback score` }); }
+    else if (d.feedbackPercent < 95) { deliveryScore = 3; flags.push({ type: 'warning', message: 'Below-average feedback suggests possible delivery issues' }); }
+    else if (d.feedbackPercent < 97) { deliveryScore = 6; }
+    else                             { deliveryScore = 8; }
+  } else {
+    // No confirmed issue — full score
+    deliveryScore = 10;
   }
-  breakdown.deliveryComplaints = { score: deliveryScore, max: 10 };
+  breakdown.deliveryComplaints = { score: deliveryScore, max: 10, label: 'Delivery Record', confirmed: dataConfidence.feedbackRate };
 
-  // ── TOTAL SCORE ───────────────────────────────────────────────────────────
+  // ── TOTAL ─────────────────────────────────────────────────────────────────
   const totalScore = Math.round(
     feedbackVolumeScore + feedbackRateScore + accountAgeScore +
     priceScore + listingScore + deliveryScore
@@ -133,35 +171,34 @@ function computeTrustScore(sellerData) {
 
   // ── RISK LABEL ────────────────────────────────────────────────────────────
   let riskLevel, riskLabel, riskColor;
-  if (totalScore >= 85) {
-    riskLevel = 'low';
-    riskLabel = 'Low Risk';
-    riskColor = '#10b981';
-  } else if (totalScore >= 65) {
-    riskLevel = 'medium';
-    riskLabel = 'Moderate Risk';
-    riskColor = '#f59e0b';
-  } else if (totalScore >= 40) {
-    riskLevel = 'high';
-    riskLabel = 'High Risk';
-    riskColor = '#ef4444';
-  } else {
-    riskLevel = 'critical';
-    riskLabel = 'Very High Risk';
-    riskColor = '#dc2626';
+  if      (totalScore >= 85) { riskLevel = 'low';      riskLabel = 'Low Risk';       riskColor = '#10b981'; }
+  else if (totalScore >= 65) { riskLevel = 'medium';   riskLabel = 'Moderate Risk';  riskColor = '#f59e0b'; }
+  else if (totalScore >= 40) { riskLevel = 'high';     riskLabel = 'High Risk';      riskColor = '#ef4444'; }
+  else                       { riskLevel = 'critical'; riskLabel = 'Very High Risk'; riskColor = '#dc2626'; }
+
+  // ── DATA CONFIDENCE NOTE ──────────────────────────────────────────────────
+  const unconfirmedCount = Object.values(dataConfidence).filter(v => !v).length;
+  const confirmedSignals = Object.values(dataConfidence).filter(v => v).length;
+
+  if (unconfirmedCount > 2) {
+    flags.push({ type: 'info', message: `${unconfirmedCount} signals could not be scraped from this page — open console for debug info` });
   }
 
-  // ── AI SUMMARY (template — replaced with real AI in backend) ─────────────
-  const dangerFlags = flags.filter(f => f.type === 'danger');
+  // ── SUMMARY ───────────────────────────────────────────────────────────────
+  const dangerFlags  = flags.filter(f => f.type === 'danger');
   const warningFlags = flags.filter(f => f.type === 'warning');
-
   let summary = '';
+
   if (riskLevel === 'low') {
-    summary = `This seller has a strong track record with ${sellerData.feedbackCount?.toLocaleString()} reviews at ${sellerData.feedbackPercent}% positive. Price is consistent with recent sold listings.`;
+    summary = `This seller has a strong track record${d.feedbackCount > 0 ? ` with ${d.feedbackCount.toLocaleString()} reviews at ${d.feedbackPercent?.toFixed(1)}% positive` : ''}. No significant risk signals detected.`;
   } else if (riskLevel === 'medium') {
-    summary = `Proceed with caution. ${warningFlags.length} concern${warningFlags.length > 1 ? 's' : ''} detected. Review the flags below before purchasing.`;
+    summary = `Proceed with caution. ${warningFlags.length} concern${warningFlags.length !== 1 ? 's' : ''} detected. Review the flags below before purchasing.`;
   } else {
-    summary = `We detected ${dangerFlags.length} high-risk signal${dangerFlags.length > 1 ? 's' : ''} with this listing. We recommend checking alternatives before buying.`;
+    summary = `${dangerFlags.length} high-risk signal${dangerFlags.length !== 1 ? 's' : ''} detected. We recommend checking alternatives before buying.`;
+  }
+
+  if (confirmedSignals < 2) {
+    summary += ' Note: limited data was available on this page — score reflects what could be confirmed.';
   }
 
   return {
@@ -172,12 +209,9 @@ function computeTrustScore(sellerData) {
     summary,
     flags,
     breakdown,
-    meta: {
-      analysedAt: new Date().toISOString(),
-      version: '1.0.0'
-    }
+    dataConfidence,
+    meta: { analysedAt: new Date().toISOString(), version: '2.0.0' }
   };
 }
 
-// Export for use in content script and popup
 if (typeof module !== 'undefined') module.exports = { computeTrustScore };

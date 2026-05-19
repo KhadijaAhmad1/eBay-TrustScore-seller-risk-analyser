@@ -205,3 +205,38 @@
 }
 
 .ts-footer a:hover { text-decoration: underline; }
+
+/* ── v4 additions ── */
+.ts-data-line {
+  font-size: 10px;
+  color: #6b7280;
+  font-family: 'DM Mono', monospace;
+  margin: 4px 0 8px;
+  line-height: 1.4;
+}
+
+.ts-stars {
+  border-top: 1px solid #e5e7eb;
+  margin-top: 10px;
+  padding-top: 8px;
+}
+
+.ts-stars-title {
+  font-size: 9px;
+  font-weight: 700;
+  color: #9ca3af;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+
+.ts-star-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+  font-size: 11px;
+}
+
+.ts-star-label { color: #6b7280; }
+.ts-star-val   { font-weight: 700; font-family: monospace; }

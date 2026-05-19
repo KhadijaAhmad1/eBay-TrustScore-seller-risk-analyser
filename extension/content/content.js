@@ -206,12 +206,14 @@
     };
 
     const breakdownHTML = Object.entries(breakdown).map(([key, val]) => {
-      // Price analysis was removed (needs API) — show N/A row instead
+      // Price analysis coming in next update — show teaser row
       if (val === null) {
         return `<div class="ts-bar-row">
-          <span class="ts-bar-label" style="color:#9ca3af">${breakdownLabels[key] || key}</span>
-          <div class="ts-bar-track"><div class="ts-bar-fill" style="width:0%;background:#374151"></div></div>
-          <span class="ts-bar-pts" style="color:#6b7280">N/A</span>
+          <span class="ts-bar-label" style="color:#6b7280">${breakdownLabels[key] || key}</span>
+          <div class="ts-bar-track" style="background:rgba(79,142,247,0.08)">
+            <div class="ts-bar-fill" style="width:0%"></div>
+          </div>
+          <span class="ts-bar-pts" style="color:#4f8ef7;font-size:9px;white-space:nowrap">Coming soon</span>
         </div>`;
       }
       const pct = Math.round((val.score / val.max) * 100);

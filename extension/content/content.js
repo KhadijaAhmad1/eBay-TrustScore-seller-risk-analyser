@@ -206,16 +206,8 @@
     };
 
     const breakdownHTML = Object.entries(breakdown).map(([key, val]) => {
-      // Price analysis coming in next update — show teaser row
-      if (val === null) {
-        return `<div class="ts-bar-row">
-          <span class="ts-bar-label" style="color:#6b7280">${breakdownLabels[key] || key}</span>
-          <div class="ts-bar-track" style="background:rgba(79,142,247,0.08)">
-            <div class="ts-bar-fill" style="width:0%"></div>
-          </div>
-          <span class="ts-bar-pts" style="color:#4f8ef7;font-size:9px;white-space:nowrap">Coming soon</span>
-        </div>`;
-      }
+      // Price analysis excluded — skip row entirely
+      if (val === null) return '';
       const pct = Math.round((val.score / val.max) * 100);
       const color = pct >= 75 ? '#10b981' : pct >= 50 ? '#f59e0b' : '#ef4444';
       const est = val.confirmed === false ? ' <span style="opacity:.5;font-size:9px" title="Estimated — awaiting profile data">~</span>' : '';

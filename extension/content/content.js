@@ -151,92 +151,46 @@
     return data;
   }
 
-  // ── STEP 2: FETCH SELLER PROFILE ─────────────────────────────────────────
+  // ── STEP 2: FETCH SELLER PROFILE via background tab ──────────────────────
+  // eBay profile pages are JS-rendered — fetch() only gets a blank shell.
+  // Background service worker opens profile in a hidden tab, waits for JS to
+  // render, scrapes the live DOM, then closes the tab automatically.
 
   async function fetchSellerProfile(username) {
-    const result = { accountAgeDays: null, memberSinceText: null, starRatings: null, debug: {} };
-    if (!username) return result;
+    const empty = { accountAgeDays: null, memberSinceText: null, starRatings: null };
+    if (!username) return empty;
 
-    let html = null;
-    const urls = [`https://www.ebay.co.uk/usr/${username}`, `https://www.ebay.com/usr/${username}`];
+    return new Promise((resolve) => {
+      const profileUrl = `https://www.ebay.co.uk/usr/${username}`;
+      console.log('[TrustScore v4] Requesting hidden-tab profile scrape:', profileUrl);
 
-    for (const url of urls) {
-      try {
-        const res = await fetch(url, { credentials: 'omit', headers: { Accept: 'text/html' } });
-        if (res.ok) { html = await res.text(); result.debug.fetchedUrl = url; break; }
-      } catch (e) { result.debug.fetchError = e.message; }
-    }
-
-    if (!html) { console.warn('[TrustScore v4] Profile fetch failed for:', username); return result; }
-
-    const doc = new DOMParser().parseFromString(html, 'text/html');
-
-    // ── Member since ───────────────────────────────────────────────────────
-    // eBay profile page shows "Member since: 14 Jan 2018" in various formats
-    const memberPatterns = [
-      /member\s+since\s*:?\s*(\d{1,2}[\s-]\w+[\s-]\d{4})/i,   // 14 Jan 2018
-      /member\s+since\s*:?\s*(\w+\s+\d{1,2},?\s+\d{4})/i,      // January 14, 2018
-      /member\s+since\s*:?\s*(\w+[-]\d{2}[-]\d{2})/i,           // Jan-14-18
-      /member\s+since\s*:?\s*(\d{4}-\d{2}-\d{2})/i,             // 2018-01-14
-      /member\s+since\s*:?\s*(\w+\s+\d{4})/i,                   // January 2018
-    ];
-
-    let memberRaw = null;
-    for (const pattern of memberPatterns) {
-      const m = searchText(pattern, doc.body);
-      if (m) { memberRaw = m[1]; break; }
-    }
-
-    // Also scan elements with "member" or "since" in their text
-    if (!memberRaw) {
-      const candidates = doc.querySelectorAll('[class*="member"], [class*="since"], [class*="info"], .str-about-me, .mem-info');
-      for (const el of candidates) {
-        for (const pattern of memberPatterns) {
-          const m = el.textContent.match(pattern);
-          if (m) { memberRaw = m[1]; break; }
+      chrome.runtime.sendMessage(
+        { type: 'FETCH_PROFILE', username, url: profileUrl },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            console.warn('[TrustScore v4] Profile error:', chrome.runtime.lastError.message);
+            return resolve(empty);
+          }
+          if (!response?.success) {
+            console.warn('[TrustScore v4] Profile scrape failed:', response?.error);
+            return resolve(empty);
+          }
+          const p = response.profileData;
+          console.log('[TrustScore v4] Profile data received:', {
+            memberSince: p.memberSinceText,
+            accountAgeDays: p.accountAgeDays,
+            stars: p.starRatings,
+            debug: p.debug,
+          });
+          resolve({
+            accountAgeDays:  p.accountAgeDays  ?? null,
+            memberSinceText: p.memberSinceText ?? null,
+            starRatings:     p.starRatings && Object.keys(p.starRatings).length > 0 ? p.starRatings : null,
+          });
         }
-        if (memberRaw) break;
-      }
-    }
-
-    if (memberRaw) {
-      const days = daysSince(memberRaw);
-      if (days !== null && days > 0 && days < 36500) {
-        result.accountAgeDays = days;
-        result.memberSinceText = memberRaw.trim();
-        result.debug.memberSince = memberRaw;
-        console.log(`[TrustScore v4] Member since: ${memberRaw} → ${days} days (${Math.round(days/365)} years)`);
-      }
-    }
-
-    // ── Star ratings ───────────────────────────────────────────────────────
-    // eBay shows 4 detailed seller ratings (1–5 stars) on profile page
-    const profileText = doc.body?.innerText || '';
-    const starMap = {
-      itemAsDescribed: /item\s+as\s+described[^\d]*([\d.]+)/i,
-      communication:   /communication[^\d]*([\d.]+)/i,
-      dispatchTime:    /dispatch\s+time[^\d]*([\d.]+)/i,
-      postage:         /postage[^\d]*([\d.]+)/i,
-    };
-
-    const stars = {};
-    for (const [key, regex] of Object.entries(starMap)) {
-      const m = profileText.match(regex);
-      if (m) {
-        const val = parseFloat(m[1]);
-        if (val >= 1.0 && val <= 5.0) stars[key] = val;
-      }
-    }
-
-    if (Object.keys(stars).length > 0) {
-      result.starRatings = stars;
-      result.debug.starRatings = stars;
-      console.log('[TrustScore v4] Star ratings:', stars);
-    }
-
-    return result;
+      );
+    });
   }
-
   // ── OVERLAY ───────────────────────────────────────────────────────────────
 
   function buildOverlayHTML(report, d) {
@@ -252,9 +206,17 @@
     };
 
     const breakdownHTML = Object.entries(breakdown).map(([key, val]) => {
+      // Price analysis was removed (needs API) — show N/A row instead
+      if (val === null) {
+        return `<div class="ts-bar-row">
+          <span class="ts-bar-label" style="color:#9ca3af">${breakdownLabels[key] || key}</span>
+          <div class="ts-bar-track"><div class="ts-bar-fill" style="width:0%;background:#374151"></div></div>
+          <span class="ts-bar-pts" style="color:#6b7280">N/A</span>
+        </div>`;
+      }
       const pct = Math.round((val.score / val.max) * 100);
       const color = pct >= 75 ? '#10b981' : pct >= 50 ? '#f59e0b' : '#ef4444';
-      const est = val.confirmed === false ? ' <span style="opacity:.5;font-size:9px" title="Estimated">~est</span>' : '';
+      const est = val.confirmed === false ? ' <span style="opacity:.5;font-size:9px" title="Estimated — awaiting profile data">~</span>' : '';
       return `<div class="ts-bar-row">
         <span class="ts-bar-label">${breakdownLabels[key] || key}${est}</span>
         <div class="ts-bar-track"><div class="ts-bar-fill" style="width:${pct}%;background:${color}"></div></div>

@@ -22,17 +22,17 @@ function computeTrustScore(d) {
     dataConfidence.feedbackVolume = false;
   } else {
     dataConfidence.feedbackVolume = true;
-    if      (d.feedbackCount >= 1000) feedbackVolumeScore = 20;
-    else if (d.feedbackCount >= 500)  feedbackVolumeScore = 17;
-    else if (d.feedbackCount >= 100)  feedbackVolumeScore = 13;
-    else if (d.feedbackCount >= 50)   feedbackVolumeScore = 9;
-    else if (d.feedbackCount >= 10)   feedbackVolumeScore = 5;
+    if      (d.feedbackCount >= 1000) feedbackVolumeScore = 25;
+    else if (d.feedbackCount >= 500)  feedbackVolumeScore = 21;
+    else if (d.feedbackCount >= 100)  feedbackVolumeScore = 16;
+    else if (d.feedbackCount >= 50)   feedbackVolumeScore = 10;
+    else if (d.feedbackCount >= 10)   feedbackVolumeScore = 6;
     else {
       feedbackVolumeScore = 2;
       flags.push({ type: 'warning', message: `Only ${d.feedbackCount} feedback ratings — new or low-volume seller` });
     }
   }
-  breakdown.feedbackVolume = { score: feedbackVolumeScore, max: 20, label: 'Feedback Volume', confirmed: dataConfidence.feedbackVolume };
+  breakdown.feedbackVolume = { score: feedbackVolumeScore, max: 25, label: 'Feedback Volume', confirmed: dataConfidence.feedbackVolume };
 
   // ── 2. POSITIVE FEEDBACK RATE (0–25) ─────────────────────────────────────
   // eBay average is 98.5%. We only penalise if we actually read a value.
@@ -41,16 +41,16 @@ function computeTrustScore(d) {
 
   if (!hasFeedbackPct && !dataConfidence.feedbackVolume) {
     // No data at all — neutral
-    feedbackRateScore = 13;
+    feedbackRateScore = 15;
     dataConfidence.feedbackRate = false;
   } else {
     dataConfidence.feedbackRate = true;
     const pct = d.feedbackPercent || 99.0;
-    if      (pct >= 99.5) feedbackRateScore = 25;
-    else if (pct >= 99.0) feedbackRateScore = 21;
-    else if (pct >= 98.0) feedbackRateScore = 16;
-    else if (pct >= 95.0) feedbackRateScore = 10;
-    else if (pct >= 90.0) feedbackRateScore = 5;
+    if      (pct >= 99.5) feedbackRateScore = 30;
+    else if (pct >= 99.0) feedbackRateScore = 26;
+    else if (pct >= 98.0) feedbackRateScore = 20;
+    else if (pct >= 95.0) feedbackRateScore = 12;
+    else if (pct >= 90.0) feedbackRateScore = 6;
     else {
       feedbackRateScore = 0;
       flags.push({ type: 'danger', message: `${pct.toFixed(1)}% positive — significantly below eBay average (98.5%)` });
@@ -59,7 +59,7 @@ function computeTrustScore(d) {
       flags.push({ type: 'warning', message: `${pct.toFixed(1)}% positive feedback — slightly below average` });
     }
   }
-  breakdown.feedbackRate = { score: feedbackRateScore, max: 25, label: 'Positive Rate', confirmed: dataConfidence.feedbackRate };
+  breakdown.feedbackRate = { score: feedbackRateScore, max: 30, label: 'Positive Rate', confirmed: dataConfidence.feedbackRate };
 
   // ── 3. ACCOUNT AGE (0–15) ─────────────────────────────────────────────────
   // Only flag if we have high confidence (member-since text found, or very low feedback)
@@ -68,11 +68,11 @@ function computeTrustScore(d) {
   if (d._accountAgeConfirmed) {
     // Real data from "member since" text on page
     dataConfidence.accountAge = true;
-    if      (d.accountAgeDays >= 365 * 5) accountAgeScore = 15;
-    else if (d.accountAgeDays >= 365 * 2) accountAgeScore = 12;
-    else if (d.accountAgeDays >= 365)     accountAgeScore = 9;
-    else if (d.accountAgeDays >= 180)     accountAgeScore = 6;
-    else if (d.accountAgeDays >= 30)      accountAgeScore = 3;
+    if      (d.accountAgeDays >= 365 * 5) accountAgeScore = 20;
+    else if (d.accountAgeDays >= 365 * 2) accountAgeScore = 16;
+    else if (d.accountAgeDays >= 365)     accountAgeScore = 12;
+    else if (d.accountAgeDays >= 180)     accountAgeScore = 8;
+    else if (d.accountAgeDays >= 30)      accountAgeScore = 4;
     else {
       accountAgeScore = 0;
       flags.push({ type: 'danger', message: `Account created ${d.accountAgeDays} days ago — very new seller` });
@@ -88,43 +88,25 @@ function computeTrustScore(d) {
   } else {
     // Not enough info — give benefit of the doubt, neutral score
     dataConfidence.accountAge = false;
-    accountAgeScore = 10;
+    accountAgeScore = 12;
   }
-  breakdown.accountAge = { score: accountAgeScore, max: 15, label: 'Account Age', confirmed: dataConfidence.accountAge };
+  breakdown.accountAge = { score: accountAgeScore, max: 20, label: 'Account Age', confirmed: dataConfidence.accountAge };
 
-  // ── 4. PRICE ANOMALY (0–20) ───────────────────────────────────────────────
-  // Only score if we have real price vs market data (from API).
-  // If price was simulated/estimated, give full neutral score.
-  let priceScore;
-
-  if (d._priceConfirmed && d.priceVsMarket) {
-    dataConfidence.price = true;
-    const ratio = d.priceVsMarket;
-    if      (ratio <= 1.05) priceScore = 20;
-    else if (ratio <= 1.15) priceScore = 16;
-    else if (ratio <= 1.25) priceScore = 10;
-    else if (ratio <= 1.50) priceScore = 4;
-    else {
-      priceScore = 0;
-      flags.push({ type: 'danger', message: `Price is ${Math.round((ratio - 1) * 100)}% above recent sold listings` });
-    }
-    if (ratio < 0.60) {
-      priceScore = Math.min(priceScore, 5);
-      flags.push({ type: 'danger', message: `Price is ${Math.round((1 - ratio) * 100)}% below market — possible counterfeit` });
-    } else if (ratio < 0.80) {
-      flags.push({ type: 'warning', message: `Price is ${Math.round((1 - ratio) * 100)}% below typical — verify authenticity` });
-    }
-  } else {
-    // No real comp data — neutral, no flag
-    dataConfidence.price = false;
-    priceScore = 14; // slightly below full to reflect uncertainty, but not penalising
-  }
-  breakdown.priceAnomaly = { score: priceScore, max: 20, label: 'Price Analysis', confirmed: dataConfidence.price };
+  // ── 4. PRICE ANOMALY — REMOVED ───────────────────────────────────────────
+  // Price comparison requires eBay sold listings API (needs API key + OAuth).
+  // Showing a fake/neutral score is misleading — removed entirely.
+  // Its 20pts redistributed: feedbackVolume +5 (→25), feedbackRate +5 (→30),
+  // accountAge +5 (→20), listingQuality +5 (→15). See max values below.
+  // breakdown entry kept as null so overlay can show "N/A" honestly.
+  breakdown.priceAnomaly = null; // excluded from scoring
 
   // ── 5. LISTING QUALITY (0–10) ─────────────────────────────────────────────
   // Only penalise on issues that are reliably detected
-  let listingScore = 10;
+  let listingScore = 15;
   const issues = d.listingIssues || [];
+
+  // Business sellers on eBay UK are regulated — slight positive signal
+  if (d.isBusiness) listingScore = Math.min(10, listingScore + 1);
 
   if (issues.includes('no_returns')) {
     listingScore -= 3;
@@ -145,7 +127,7 @@ function computeTrustScore(d) {
     flags.push({ type: 'info', message: 'Large quantity available — may be bulk/dropship seller' });
   }
   listingScore = Math.max(0, listingScore);
-  breakdown.listingQuality = { score: listingScore, max: 10, label: 'Listing Quality', confirmed: true };
+  breakdown.listingQuality = { score: listingScore, max: 15, label: 'Listing Quality', confirmed: true };
 
   // ── 6. DELIVERY RECORD (0–10) ─────────────────────────────────────────────
   // Only penalise if feedback% is confirmed AND meaningfully low
@@ -166,7 +148,7 @@ function computeTrustScore(d) {
   // ── TOTAL ─────────────────────────────────────────────────────────────────
   const totalScore = Math.round(
     feedbackVolumeScore + feedbackRateScore + accountAgeScore +
-    priceScore + listingScore + deliveryScore
+    listingScore + deliveryScore
   );
 
   // ── RISK LABEL ────────────────────────────────────────────────────────────

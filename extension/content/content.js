@@ -151,44 +151,26 @@
     return data;
   }
 
-  // ── STEP 2: FETCH SELLER PROFILE via background tab ──────────────────────
-  // eBay profile pages are JS-rendered — fetch() only gets a blank shell.
-  // Background service worker opens profile in a hidden tab, waits for JS to
-  // render, scrapes the live DOM, then closes the tab automatically.
+  // ── STEP 2: TELL SERVICE WORKER TO FETCH PROFILE ─────────────────────────
+  // We do NOT fetch the profile here — eBay pages are JS-rendered so fetch()
+  // returns a blank shell. Instead we tell the service worker (via LISTING_SCRAPED)
+  // to open a real hidden tab. The SW drives the rest via chrome.tabs.onUpdated
+  // which keeps it alive. When done, SW sends UPDATE_OVERLAY back to us.
 
-  async function fetchSellerProfile(username) {
-    const empty = { accountAgeDays: null, memberSinceText: null, starRatings: null };
-    if (!username) return empty;
-
-    return new Promise((resolve) => {
-      const profileUrl = `https://www.ebay.co.uk/usr/${username}`;
-      console.log('[TrustScore v4] Requesting hidden-tab profile scrape:', profileUrl);
-
-      chrome.runtime.sendMessage(
-        { type: 'FETCH_PROFILE', username, url: profileUrl },
-        (response) => {
-          if (chrome.runtime.lastError) {
-            console.warn('[TrustScore v4] Profile error:', chrome.runtime.lastError.message);
-            return resolve(empty);
-          }
-          if (!response?.success) {
-            console.warn('[TrustScore v4] Profile scrape failed:', response?.error);
-            return resolve(empty);
-          }
-          const p = response.profileData;
-          console.log('[TrustScore v4] Profile data received:', {
-            memberSince: p.memberSinceText,
-            accountAgeDays: p.accountAgeDays,
-            stars: p.starRatings,
-            debug: p.debug,
-          });
-          resolve({
-            accountAgeDays:  p.accountAgeDays  ?? null,
-            memberSinceText: p.memberSinceText ?? null,
-            starRatings:     p.starRatings && Object.keys(p.starRatings).length > 0 ? p.starRatings : null,
-          });
+  function requestProfileEnrichment(sellerData) {
+    if (!sellerData.sellerUsername) return;
+    chrome.tabs.getCurrent(currentTab => {
+      chrome.runtime.sendMessage({
+        type: 'LISTING_SCRAPED',
+        sellerData,
+        listingTabId: currentTab?.id,
+      }, (response) => {
+        if (chrome.runtime.lastError) {
+          console.warn('[TrustScore v4] LISTING_SCRAPED error:', chrome.runtime.lastError.message);
+        } else {
+          console.log('[TrustScore v4] SW acknowledged profile request:', response);
         }
-      );
+      });
     });
   }
   // ── OVERLAY ───────────────────────────────────────────────────────────────
@@ -321,30 +303,30 @@
 
     await new Promise(r => setTimeout(r, 1500));
 
-    // Phase 1: immediate score from listing page
+    // Phase 1: scrape listing, score immediately, show overlay
     const sellerData = scrapeListingPage();
-    await scoreAndInject(sellerData);
+    const report = await scoreAndInject(sellerData);
 
-    // Phase 2: enrich with real profile data, re-score
-    if (sellerData.sellerUsername) {
-      const profile = await fetchSellerProfile(sellerData.sellerUsername);
-
-      if (profile.accountAgeDays !== null) {
-        sellerData.accountAgeDays    = profile.accountAgeDays;
-        sellerData._accountAgeConfirmed = true;
-        sellerData.memberSinceText   = profile.memberSinceText;
-      }
-      if (profile.starRatings) sellerData.starRatings = profile.starRatings;
-
-      const finalReport = await scoreAndInject(sellerData);
-      if (finalReport) {
-        chrome.runtime.sendMessage({ type: 'STORE_REPORT', report: { ...finalReport, sellerData } });
-      }
-    } else {
-      chrome.runtime.sendMessage({ type: 'STORE_REPORT', report: { sellerData } });
-      console.warn('[TrustScore v4] Could not extract seller username — profile fetch skipped');
+    if (report) {
+      chrome.runtime.sendMessage({ type: 'STORE_REPORT', report: { ...report, sellerData } });
     }
+
+    // Phase 2: tell service worker to open hidden profile tab
+    // SW drives the rest via tab events — sends UPDATE_OVERLAY when done
+    requestProfileEnrichment(sellerData);
   }
+
+  // Listen for UPDATE_OVERLAY pushed back from service worker
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message.type === 'UPDATE_OVERLAY') {
+      console.log('[TrustScore v4] Profile enrichment received:', {
+        score: message.report.score,
+        memberSince: message.sellerData?.memberSinceText,
+        accountAgeDays: message.sellerData?.accountAgeDays,
+      });
+      injectOverlay(message.report, message.sellerData);
+    }
+  });
 
   init();
 

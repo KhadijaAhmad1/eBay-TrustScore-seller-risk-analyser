@@ -1,20 +1,62 @@
 /**
- * eBay TrustScore — Background Service Worker v2
+ * eBay TrustScore — Background Service Worker v3
  *
- * Handles:
- * - ANALYSE_LISTING  → score seller data
- * - GET_STORED_REPORT / STORE_REPORT → report cache
- * - FETCH_PROFILE → opens seller profile in hidden tab, scrapes after JS renders, closes tab
+ * Key design change: profile fetch is driven by chrome.tabs.onUpdated
+ * (which keeps the service worker alive), NOT by a message from content script
+ * (which arrives after the SW may have gone to sleep).
+ *
+ * Flow:
+ *  1. Listing tab completes → SW wakes via onUpdated → injects content script
+ *  2. Content script scrapes listing → sends LISTING_SCRAPED with username
+ *  3. SW receives message (still awake) → opens hidden profile tab
+ *  4. Profile tab completes → SW wakes again via onUpdated → injects scraper
+ *  5. SW gets profile data → stores enriched report → tells listing tab to update overlay
  */
 
 importScripts('scoring-engine.js');
 
+// Track which listing tabs are awaiting profile enrichment
+// { listingTabId → { sellerData, profileTabId } }
+const pendingProfiles = {};
+
 // ── MESSAGE ROUTER ────────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
+  // Step 1 score: content script sends full seller data for immediate scoring
   if (message.type === 'ANALYSE_LISTING') {
     const report = computeTrustScore(message.data);
     sendResponse({ success: true, report });
+    return false;
+  }
+
+  // Content script tells us it has scraped the listing and found a username
+  if (message.type === 'LISTING_SCRAPED') {
+    const { sellerData, listingTabId } = message;
+    console.log('[TrustScore SW] Listing scraped, username:', sellerData.sellerUsername);
+
+    if (!sellerData.sellerUsername) {
+      sendResponse({ success: false, reason: 'no username' });
+      return false;
+    }
+
+    // Open hidden profile tab — SW stays awake because it owns this operation
+    const profileUrl = `https://www.ebay.co.uk/usr/${sellerData.sellerUsername}`;
+
+    chrome.tabs.create({ url: profileUrl, active: false }, (profileTab) => {
+      if (chrome.runtime.lastError) {
+        console.warn('[TrustScore SW] Could not open profile tab:', chrome.runtime.lastError.message);
+        return;
+      }
+      console.log('[TrustScore SW] Profile tab opened:', profileTab.id, profileUrl);
+      // Store state so onUpdated knows what to do when this tab loads
+      pendingProfiles[profileTab.id] = {
+        listingTabId: listingTabId || sender.tab?.id,
+        sellerData,
+        profileUrl,
+      };
+    });
+
+    sendResponse({ success: true });
     return false;
   }
 
@@ -32,99 +74,98 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  if (message.type === 'FETCH_PROFILE') {
-    // Open profile page in a hidden (minimised) tab, scrape after render, close it
-    fetchProfileViaTab(message.username, message.url)
-      .then(profileData => sendResponse({ success: true, profileData }))
-      .catch(err => sendResponse({ success: false, error: err.message }));
-    return true; // async
-  }
-
   return true;
 });
 
-// ── BADGE MANAGEMENT ──────────────────────────────────────────────────────────
+// ── TAB LIFECYCLE ─────────────────────────────────────────────────────────────
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.status === 'complete' && tab.url) {
-    const isListing = tab.url.includes('ebay.co.uk/itm/') || tab.url.includes('ebay.com/itm/');
-    if (isListing) {
-      chrome.action.setBadgeText({ text: '!', tabId });
-      chrome.action.setBadgeBackgroundColor({ color: '#f59e0b', tabId });
-    } else {
-      chrome.action.setBadgeText({ text: '', tabId });
-    }
+  if (changeInfo.status !== 'complete' || !tab.url) return;
+
+  const isListing = tab.url.includes('ebay.co.uk/itm/') || tab.url.includes('ebay.com/itm/');
+
+  // Badge management for listing tabs
+  if (isListing) {
+    chrome.action.setBadgeText({ text: '!', tabId });
+    chrome.action.setBadgeBackgroundColor({ color: '#f59e0b', tabId });
+  }
+
+  // Profile tab finished loading — scrape it
+  if (pendingProfiles[tabId]) {
+    const { listingTabId, sellerData } = pendingProfiles[tabId];
+    console.log('[TrustScore SW] Profile tab loaded, scraping in 2s...', tabId);
+
+    // Wait 2s for eBay's JS to render the profile content
+    setTimeout(() => {
+      chrome.scripting.executeScript(
+        { target: { tabId }, func: scrapeProfileDOM },
+        (results) => {
+          // Always close the profile tab
+          chrome.tabs.remove(tabId).catch(() => {});
+          delete pendingProfiles[tabId];
+
+          if (chrome.runtime.lastError) {
+            console.warn('[TrustScore SW] Script injection failed:', chrome.runtime.lastError.message);
+            return;
+          }
+
+          const profileData = results?.[0]?.result;
+          if (!profileData) {
+            console.warn('[TrustScore SW] No data returned from profile scrape');
+            return;
+          }
+
+          console.log('[TrustScore SW] Profile scraped:', {
+            memberSince: profileData.memberSinceText,
+            accountAgeDays: profileData.accountAgeDays,
+            stars: profileData.starRatings,
+            bodySample: profileData.debug?.bodySample?.slice(0, 100),
+          });
+
+          // Merge profile data into seller data
+          if (profileData.accountAgeDays) {
+            sellerData.accountAgeDays = profileData.accountAgeDays;
+            sellerData._accountAgeConfirmed = true;
+            sellerData.memberSinceText = profileData.memberSinceText;
+          }
+          if (profileData.starRatings && Object.keys(profileData.starRatings).length > 0) {
+            sellerData.starRatings = profileData.starRatings;
+          }
+
+          // Re-score with enriched data
+          const enrichedReport = computeTrustScore(sellerData);
+
+          // Store enriched report
+          chrome.storage.local.set({
+            lastReport: { ...enrichedReport, sellerData }
+          });
+
+          // Tell the listing tab to update its overlay
+          if (listingTabId) {
+            chrome.tabs.sendMessage(listingTabId, {
+              type: 'UPDATE_OVERLAY',
+              report: enrichedReport,
+              sellerData,
+            }).catch(() => {
+              console.log('[TrustScore SW] Could not message listing tab — may have navigated away');
+            });
+          }
+        }
+      );
+    }, 2000);
   }
 });
 
-// ── PROFILE FETCH VIA HIDDEN TAB ──────────────────────────────────────────────
-async function fetchProfileViaTab(username, profileUrl) {
-  return new Promise((resolve, reject) => {
-    let profileTabId = null;
-    const timeout = setTimeout(() => {
-      // Clean up tab if it's still open
-      if (profileTabId !== null) {
-        chrome.tabs.remove(profileTabId).catch(() => {});
-      }
-      reject(new Error('Profile fetch timed out after 15s'));
-    }, 15000);
+chrome.tabs.onRemoved.addListener((tabId) => {
+  // Clean up if profile tab was closed manually
+  if (pendingProfiles[tabId]) {
+    console.log('[TrustScore SW] Profile tab closed manually, cleaning up');
+    delete pendingProfiles[tabId];
+  }
+});
 
-    // Open profile page in background (not active, not in a window)
-    chrome.tabs.create({
-      url: profileUrl,
-      active: false,        // don't switch to it
-      pinned: false,
-    }, (tab) => {
-      if (chrome.runtime.lastError) {
-        clearTimeout(timeout);
-        return reject(new Error(chrome.runtime.lastError.message));
-      }
-
-      profileTabId = tab.id;
-
-      // Wait for the tab to fully load (JS rendered)
-      const onUpdated = (tabId, changeInfo) => {
-        if (tabId !== profileTabId) return;
-        if (changeInfo.status !== 'complete') return;
-
-        chrome.tabs.onUpdated.removeListener(onUpdated);
-
-        // Give eBay's JS 2 extra seconds to inject dynamic content
-        setTimeout(() => {
-          chrome.scripting.executeScript({
-            target: { tabId: profileTabId },
-            func: scrapeProfilePage,
-            args: [username],
-          }, (results) => {
-            // Always close the tab
-            chrome.tabs.remove(profileTabId).catch(() => {});
-            clearTimeout(timeout);
-
-            if (chrome.runtime.lastError) {
-              return reject(new Error(chrome.runtime.lastError.message));
-            }
-
-            const result = results?.[0]?.result;
-            if (result) {
-              console.log('[TrustScore BG] Profile scraped:', result);
-              resolve(result);
-            } else {
-              reject(new Error('No result from profile scrape'));
-            }
-          });
-        }, 2000);
-      };
-
-      chrome.tabs.onUpdated.addListener(onUpdated);
-    });
-  });
-}
-
-// ── PROFILE PAGE SCRAPER (runs inside the profile tab) ───────────────────────
-// This function is serialised and injected into the rendered profile page
-// so it has full access to the JS-rendered DOM
-function scrapeProfilePage(username) {
+// ── PROFILE PAGE SCRAPER (injected into live profile tab DOM) ─────────────────
+function scrapeProfileDOM() {
   const result = {
-    username,
     accountAgeDays: null,
     memberSinceText: null,
     starRatings: {},
@@ -134,79 +175,79 @@ function scrapeProfilePage(username) {
   try {
     const bodyText = document.body.innerText || '';
     result.debug.bodyLength = bodyText.length;
-    result.debug.pageTitle = document.title;
+    result.debug.pageTitle  = document.title;
 
-    // ── Member since ───────────────────────────────────────────────────────
-    // Try data-testid elements first (eBay's structured markup)
-    const allEls = [...document.querySelectorAll('[data-testid], span, div, p, li')];
+    // Sample body for debugging
+    const lines = bodyText.split('\n')
+      .map(l => l.trim())
+      .filter(l => l.length > 8 && /[a-zA-Z]{2}/.test(l));
+    result.debug.bodySample = lines.slice(0, 20).join(' | ').slice(0, 600);
 
-    // Look for element whose text contains a year and "member" or "since"
-    const memberPatterns = [
-      /member\s+since[:\s]+([A-Za-z0-9 ,\-\/]+\d{4})/i,
-      /registered[:\s]+([A-Za-z0-9 ,\-\/]+\d{4})/i,
+    // ── Member since ────────────────────────────────────────────────────────
+    const patterns = [
+      /member\s+since[:\s]+(\d{1,2}[\s\-]\w+[\s\-]\d{4})/i,   // 14 Jan 2018
+      /member\s+since[:\s]+(\w+\s+\d{1,2},?\s+\d{4})/i,        // January 14, 2018
+      /member\s+since[:\s]+(\d{4}-\d{2}-\d{2})/i,              // 2018-01-14
+      /member\s+since[:\s]+(\w+\s+\d{4})/i,                    // January 2018
+      /member\s+since[:\s]+(\w+-\d{2}-\d{2})/i,                // Jan-14-18
+      /registered[:\s]+(\d{1,2}[\s\-]\w+[\s\-]\d{4})/i,
     ];
 
     let memberRaw = null;
 
-    // First: search all text nodes
+    // Walk all text nodes
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
     let node;
     while ((node = walker.nextNode())) {
       const txt = node.textContent.trim();
-      if (txt.length < 5 || txt.length > 100) continue;
-      for (const pattern of memberPatterns) {
-        const m = txt.match(pattern);
+      if (txt.length < 4 || txt.length > 120) continue;
+      for (const p of patterns) {
+        const m = txt.match(p);
         if (m) { memberRaw = m[1].trim(); break; }
       }
       if (memberRaw) break;
     }
 
-    // Second: search full body text (catches multi-node text)
+    // Fallback: search full body text
     if (!memberRaw) {
-      for (const pattern of memberPatterns) {
-        const m = bodyText.match(pattern);
+      for (const p of patterns) {
+        const m = bodyText.match(p);
         if (m) { memberRaw = m[1].trim(); break; }
       }
     }
 
-    // Third: look for date-like strings near "member" keyword
+    // Fallback: find "member" keyword then grab nearby date
     if (!memberRaw) {
-      const memberIdx = bodyText.toLowerCase().indexOf('member');
-      if (memberIdx !== -1) {
-        const nearby = bodyText.slice(memberIdx, memberIdx + 60);
+      const idx = bodyText.toLowerCase().indexOf('member');
+      if (idx !== -1) {
+        const nearby = bodyText.slice(idx, idx + 80);
         result.debug.memberNearby = nearby;
-        const dateMatch = nearby.match(/(\d{1,2}[\s\-\/]\w+[\s\-\/]\d{4}|\w+\s+\d{4}|\d{4})/);
-        if (dateMatch) memberRaw = dateMatch[1];
+        const dm = nearby.match(/(\d{1,2}[\s\-\/]\w+[\s\-\/]\d{4}|\w+\s+\d{4}|\d{4})/);
+        if (dm) memberRaw = dm[1];
       }
     }
 
+    result.debug.memberSinceRaw = memberRaw;
+
     if (memberRaw) {
       result.memberSinceText = memberRaw;
-      result.debug.memberSinceRaw = memberRaw;
-
-      // Parse to days
-      try {
-        const parsed = new Date(memberRaw);
-        if (!isNaN(parsed.getTime()) && parsed.getFullYear() > 1990) {
-          result.accountAgeDays = Math.floor((Date.now() - parsed.getTime()) / 86400000);
-        }
-      } catch (e) {}
-
-      // If standard parse failed, try extracting year only
-      if (!result.accountAgeDays) {
-        const yearMatch = memberRaw.match(/(\d{4})/);
-        if (yearMatch) {
-          const year = parseInt(yearMatch[1]);
-          if (year > 1990 && year <= new Date().getFullYear()) {
-            // Estimate: assume Jan 1 of that year
-            result.accountAgeDays = Math.floor((Date.now() - new Date(`${year}-01-01`).getTime()) / 86400000);
-            result.debug.yearOnlyEstimate = true;
+      const parsed = new Date(memberRaw);
+      if (!isNaN(parsed.getTime()) && parsed.getFullYear() > 1990) {
+        result.accountAgeDays = Math.floor((Date.now() - parsed.getTime()) / 86400000);
+      } else {
+        // Year-only fallback
+        const ym = memberRaw.match(/(\d{4})/);
+        if (ym) {
+          const yr = parseInt(ym[1]);
+          if (yr > 1990 && yr <= new Date().getFullYear()) {
+            result.accountAgeDays = Math.floor((Date.now() - new Date(`${yr}-06-01`).getTime()) / 86400000);
+            result.debug.yearOnlyFallback = true;
           }
         }
       }
     }
 
-    // ── Detailed star ratings ──────────────────────────────────────────────
+    // ── Star ratings ────────────────────────────────────────────────────────
     const starPatterns = {
       itemAsDescribed: /item\s+as\s+described[^\d]*([\d.]+)/i,
       communication:   /communication[^\d]*([\d.]+)/i,
@@ -221,11 +262,6 @@ function scrapeProfilePage(username) {
         if (val >= 1.0 && val <= 5.0) result.starRatings[key] = val;
       }
     }
-
-    // ── Sample body text for debugging ────────────────────────────────────
-    // Grab first 500 chars that contain letters (skip nav/script noise)
-    const lines = bodyText.split('\n').filter(l => l.trim().length > 10 && /[a-zA-Z]{3}/.test(l));
-    result.debug.bodySample = lines.slice(0, 15).join(' | ').slice(0, 400);
 
   } catch (err) {
     result.debug.error = err.message;
